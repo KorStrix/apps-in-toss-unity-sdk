@@ -176,7 +176,8 @@ function aitDevtoolsPanelPlugin(): Plugin {
  *
  * head-prepend + order:'pre'로 문서 최초 스크립트로 실행시켜 native fetch를 스냅샷하고,
  * window.fetch를 accessor property로 재정의해 이후 어떤 스크립트가 `window.fetch = X`를
- * 대입하더라도(vConsole 포함, 설치 타이밍 무관) 실제로는 "delegate"에만 저장되도록 가로챈다.
+ * 대입할 때마다 이전 delegate를 캡처한 새 wrapper를 만든다. Proxy가 이전 fetch를
+ * 참조해도 이후 대입된 delegate를 다시 읽지 않아 자기 자신으로 재귀하지 않는다.
  * Build 산출물(.unityweb/.wasm/.data, /Build/ 경로) 요청만 항상 캡처해둔 네이티브 fetch로
  * 우회시키고, 그 외 요청은 delegate(= vConsole 등이 마지막으로 설치한 patched fetch)로
  * 위임해 Network 탭 가시성을 유지한다.
@@ -192,24 +193,27 @@ function aitNativeFetchGuardPlugin(): Plugin {
           '(function () {',
           '  if (typeof window === "undefined" || typeof window.fetch !== "function") return;',
           '  var nativeFetch = window.fetch;',
-          '  var delegate = nativeFetch;',
           '  function isBuildAssetUrl(input) {',
           '    var url = "";',
           '    if (typeof input === "string") url = input;',
           '    else if (input && typeof input.url === "string") url = input.url;',
+          '    else if (input && typeof input.href === "string") url = input.href;',
           '    else return false;',
           '    return /\\/Build\\//.test(url) || /\\.(unityweb|wasm|data)(\\?|$)/.test(url);',
           '  }',
-          '  function stableFetch() {',
-          '    var fn = isBuildAssetUrl(arguments[0]) ? nativeFetch : delegate;',
-          '    return fn.apply(window, arguments);',
+          '  function guardFetch(delegate) {',
+          '    return function () {',
+          '      var fn = isBuildAssetUrl(arguments[0]) ? nativeFetch : delegate;',
+          '      return fn.apply(window, arguments);',
+          '    };',
           '  }',
+          '  var guardedFetch = guardFetch(nativeFetch);',
           '  try {',
           '    Object.defineProperty(window, "fetch", {',
           '      configurable: true,',
           '      enumerable: true,',
-          '      get: function () { return stableFetch; },',
-          '      set: function (v) { delegate = v; },',
+          '      get: function () { return guardedFetch; },',
+          '      set: function (v) { guardedFetch = guardFetch(v); },',
           '    });',
           '  } catch (e) {',
           '    console.warn("[AIT] native fetch guard install failed:", e);',
